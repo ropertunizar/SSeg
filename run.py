@@ -16,11 +16,6 @@ try:
     from seed_utils import set_global_seed
 except Exception:
     set_global_seed = None  # Fallback if module unavailable
-import pty
-import select
-import fcntl
-import termios
-import struct
 
 def run_experiment(experiment_name, strategy, output_dir, num_points=None, debug_expanded_masks=False, **kwargs):
     """
@@ -265,30 +260,17 @@ def collect_results(experiment_dirs):
             if metrics_path.exists():
                 with open(metrics_path, "r") as f:
                     metrics = json.load(f)
-                # Try to load legacy evaluation results for global_mpa (macro pixel accuracy)
-                global_mpa = None
-                legacy_eval_path = exp_dir / "evaluation_results.json"
-                if legacy_eval_path.exists():
-                    try:
-                        with open(legacy_eval_path, "r") as lf:
-                            legacy_eval = json.load(lf)
-                            global_mpa = legacy_eval.get("global_mpa")
-                    except Exception as e:
-                        print(f"Warning: could not read legacy evaluation file for {exp_dir}: {e}")
-                if global_mpa is None:
-                    # Fallback: derive from evaluation_results.json missing; leave as 0 so it's obvious
-                    global_mpa = 0
-                
+
                 # Extract key metrics
                 results.append({
                     "experiment_name": config.get("experiment_name", "Unknown"),
                     "strategy": config.get("strategy", "Unknown"),
                     "num_points": config.get("num_points", 0),
                     # Replace global_miou column with macro pixel accuracy (global_mpa)
-                    "mpa": global_mpa,
-                    "mean_per_class_iou": metrics.get("mean_per_class_iou", 0),
-                    "images_evaluated": metrics.get("images_evaluated", 0),
-                    "classes_evaluated": metrics.get("classes_evaluated", 0)
+                    "mPA": metrics.get("global_mpa", 0),
+                    "mIoU": metrics.get("global_miou", 0),
+                    "num_classes": metrics.get("num_classes", 0),
+                    "num_images": metrics.get("num_images_evaluated", 0)
                 })
         except Exception as e:
             print(f"Error processing experiment {exp_dir}: {e}")
@@ -326,9 +308,10 @@ def main():
         {
             "name": "demo",
             "strategy": "dynamicPoints",
-            "num_points": 30,
+            "num_points": 25,
             "images": "demo/images/",
             "ground_truth": "demo/labels",
+            "default-background-class-id": 34,
             "color_dict": "demo/color_dict.json" # For evaluation
         },
 

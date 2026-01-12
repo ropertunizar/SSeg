@@ -18,14 +18,13 @@ class PointSelectionStrategy(ABC):
         self._rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
     
     @abstractmethod
-    def select_points(self, segmenter, image, gt_masks, expanded_masks=None):
+    def select_points(self, segmenter, image, expanded_masks=None):
         """
         Select points for expansion.
         
         Args:
             segmenter: The SAM segmenter
             image: The input image
-            gt_masks: Ground truth masks
             expanded_masks: List of already expanded masks
             
         Returns:
@@ -177,22 +176,81 @@ class ListSelectionStrategy(PointSelectionStrategy):
         else:
             if image_name is None:
                 return np.empty((0,2), dtype=int), None
-            name_lower = str(image_name).lower()
-            col_lower = df[cols['image']].astype(str).str.lower()
-            mask = col_lower == name_lower
-            # If stem provided (no dot) try appending common extensions
+            import os
+            # Normalize input name and prepare candidate variants
+            name_raw = str(image_name).strip()
+            name_lower = name_raw.lower().replace('\\', '/').lstrip('./')
+            basename = os.path.basename(name_lower)
+            base_no_ext = os.path.splitext(basename)[0]
+            candidates = {
+                name_lower,
+                basename,
+                base_no_ext,
+                './' + name_lower,
+                name_lower.lstrip('./')
+            }
+
+            # Normalize CSV column values for robust comparison (forward slashes, lowercased)
+            col_series = df[cols['image']].astype(str).str.replace('\\\\', '/').str.replace('\\', '/').str.lower().str.lstrip('./')
+
+            # 1) fast isin check against prepared candidates
+            try:
+                mask = col_series.isin(candidates)
+            except Exception:
+                mask = col_series == name_lower
+
+            # 2) fallback: endswith basename (handles absolute/full paths in CSV)
+            if not mask.any():
+                try:
+                    mask = col_series.str.endswith(basename)
+                except Exception:
+                    mask = col_series == name_lower
+            # 3) fallback: compare stems (handle .jpg vs .jpeg etc)
+            if not mask.any():
+                try:
+                    from pathlib import PurePosixPath
+                    csv_stems = col_series.apply(lambda s: PurePosixPath(s).stem.lower())
+                    stem_eq = (csv_stems == base_no_ext)
+                    if stem_eq.any():
+                        mask = stem_eq
+                except Exception:
+                    # robust fallback for older pandas/numpy; build list and compare
+                    try:
+                        from pathlib import PurePosixPath
+                        csv_list = col_series.tolist()
+                        import numpy as _np
+                        stem_equal_mask = _np.array([PurePosixPath(s).stem.lower() == base_no_ext for s in csv_list], dtype=bool)
+                        if stem_equal_mask.any():
+                            mask = stem_equal_mask
+                    except Exception:
+                        pass
+
+            # 4) final fallback: if name had no extension, try appending common extensions
             if not mask.any() and '.' not in name_lower:
-                for ext in ('.jpg','.jpeg','.png','.tif','.tiff'):
-                    mask_ext = col_lower == (name_lower + ext)
+                for ext in ('.jpg', '.jpeg', '.png', '.tif', '.tiff'):
+                    try:
+                        mask_ext = col_series == (name_lower + ext)
+                    except Exception:
+                        mask_ext = col_series == (name_lower + ext)
                     if mask_ext.any():
                         mask = mask_ext
                         break
-            # If name provided had extension but no match, try base
-            if not mask.any() and '.' in name_lower:
-                import os
-                base = os.path.splitext(name_lower)[0]
-                mask = col_lower == base
             sub = df[mask]
+            # Diagnostic: if no rows matched, print helpful context to debug mismatches
+            if sub.empty:
+                try:
+                    uniq = col_series.unique()
+                    sample_vals = [str(x) for x in (uniq[:10] if hasattr(uniq, '__getitem__') else list(uniq))]
+                except Exception:
+                    sample_vals = []
+                try:
+                    print("[ListSelectionStrategy][DEBUG] No rows matched for image_name=", image_name)
+                    print("  candidates=", sorted(list(candidates)))
+                    print("  basename=", basename, " base_no_ext=", base_no_ext)
+                    print("  first 10 unique CSV image values=", sample_vals)
+                    print("  any exact match?", int((col_series == name_lower).any()), " any basename match?", int((col_series == basename).any()))
+                except Exception:
+                    pass
         if sub.empty:
             return np.empty((0,2), dtype=int), None
         rcol = self._cols['row']
@@ -206,7 +264,7 @@ class ListSelectionStrategy(PointSelectionStrategy):
         return pts, classes
 
     # -------- Public API --------
-    def select_points(self, segmenter, image, gt_masks, expanded_masks=None, image_name=None):
+    def select_points(self, segmenter, image, expanded_masks=None, image_name=None):
         self._load_csv_once()
         active_image = image_name or self.image_name
         pts, classes = self._filter_rows(active_image)
@@ -239,13 +297,13 @@ class ListSelectionStrategy(PointSelectionStrategy):
 class RandomSelectionStrategy(PointSelectionStrategy):
     """Uniform random point sampler ignoring masks (baseline)."""
 
-    def __init__(self, num_points=30, random_seed=None, seed=None, **kwargs):
+    def __init__(self, num_points=25, random_seed=None, seed=None, **kwargs):
         effective_seed = seed if seed is not None else random_seed
         super().__init__(seed=effective_seed, **kwargs)
         self.num_points = int(num_points)
         self.uses_contrastive_learning = False
 
-    def select_points(self, segmenter, image, gt_masks, expanded_masks=None, image_name=None):
+    def select_points(self, segmenter, image, expanded_masks=None, image_name=None):
         """Return N random (y,x) coordinates within image bounds.
 
         Returns:
@@ -263,12 +321,12 @@ class GridSelectionStrategy(PointSelectionStrategy):
     as close as possible but not greater than num_points. Points are placed at the center of each cell.
     If num_points is not a perfect square, uses the nearest square below num_points (e.g. for 5, uses 2x2=4).
     """
-    def __init__(self, num_points=30, **kwargs):
+    def __init__(self, num_points=25, **kwargs):
         super().__init__(**kwargs)
         self.num_points = num_points
         self.uses_contrastive_learning = False
 
-    def select_points(self, segmenter, image, gt_masks, expanded_masks=None, image_name=None):
+    def select_points(self, segmenter, image, expanded_masks=None, image_name=None):
         import numpy as np
         H, W = image.shape[:2]
         # Find the largest n such that n*n <= num_points
@@ -302,7 +360,7 @@ class SAM2GuidedSelectionStrategy(PointSelectionStrategy):
         (Fast approximation; avoids pairwise IoU loop.)
     """
     
-    def __init__(self, num_points=30, area_weight=0.9, conf_weight=0.1, **kwargs):
+    def __init__(self, num_points=25, area_weight=0.9, conf_weight=0.1, **kwargs):
         """
         Args:
             num_points (int): Max number of points to return.
@@ -318,7 +376,7 @@ class SAM2GuidedSelectionStrategy(PointSelectionStrategy):
     # Use the base class RNG
 
     
-    def select_points(self, segmenter, image, gt_masks, expanded_masks=None, image_name=None):
+    def select_points(self, segmenter, image, expanded_masks=None, image_name=None):
         """Return up to num_points (y,x) points.
 
         segmenter.masks is expected to be a list of dicts with at least:
@@ -428,7 +486,7 @@ class DynamicPointsSelectionStrategy(PointSelectionStrategy):
     Use `setup(image, generated_masks)` once per image, then call `get_next_point(last_mask, last_feature)` each iteration.
     Visualize acquisition both as pixel heatmap (`display_acquisition_heatmap`) and mask-centroid scores (`display_mask_score`).
     """
-    def __init__(self, num_points=30, lambda_balance=0.5, heatmap_fraction=0.5):
+    def __init__(self, num_points=25, lambda_balance=0.5, heatmap_fraction=0.5):
         super().__init__()
         self.num_points = num_points
         self.lambda_balance = lambda_balance
@@ -458,8 +516,8 @@ class DynamicPointsSelectionStrategy(PointSelectionStrategy):
         ys, xs = np.nonzero(mask)
         return np.array([ys.mean(), xs.mean()])
     
-    def select_points(self, segmenter, image, gt_masks, expanded_masks=None):
-        return super().select_points(segmenter, image, gt_masks, expanded_masks)
+    def select_points(self, segmenter, image, expanded_masks=None):
+        return super().select_points(segmenter, image, expanded_masks)
 
     def _snapped_point(self, mask, y, x):
         """If (y,x) is outside mask, snap to nearest inside-mask pixel."""
@@ -869,7 +927,7 @@ class ToolSelectionStrategy(PointSelectionStrategy):
         pass
     
 
-    def select_points(self, segmenter, image, gt_masks, expanded_masks=None):
+    def select_points(self, segmenter, image, expanded_masks=None):
         pass
 
     def _get_random_point(self, H, W):

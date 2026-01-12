@@ -34,7 +34,7 @@ class SuperpixelLabelExpander:
             try:
                 torch.backends.cudnn.benchmark = False  # type: ignore
                 if hasattr(torch.backends.cudnn, 'deterministic'):
-                    torch.backends.cudnn.deterministic = True  # type: ignoreobj
+                    torch.backends.cudnn.deterministic = True  # type: ignore
                 # Disable TF32 for tighter reproducibility
                 # Re-enable TF32 for performance (still keeping other deterministic aspects)
                 if hasattr(torch.backends.cuda.matmul, 'allow_tf32'):
@@ -248,43 +248,69 @@ class SuperpixelLabelExpander:
 
             # Label array for all labeled pixels
             mask_np = np.array(sparse_labels).squeeze()
+            # If mask_np is 1-D (no labels), make sure downstream code handles it
+            if mask_np.ndim == 0:
+                mask_np = np.expand_dims(mask_np, 0)
             labelled_indices = np.argwhere(mask_np > 0)
-            labels = [
-                [mask_np[y, x] - 1, connected[y, x], y, x] 
-                for y, x in labelled_indices
-            ]
-            labels_array = np.array(labels)  # shape = [num_points, 4]
+            labels = []
+            for yx in labelled_indices:
+                # labelled_indices entries may be (y,x) pairs
+                if yx.size == 1:
+                    # single index case (unexpected), skip
+                    continue
+                y, x = int(yx[0]), int(yx[1])
+                labels.append([int(mask_np[y, x]) - 1, int(connected[y, x]), y, x])
+
+            labels_array = np.array(labels)
+            # Ensure labels_array is 2D with shape (N,4) even if empty
+            if labels_array.size == 0:
+                labels_array = np.zeros((0, 4), dtype=int)
 
             # Calculate labels for each superpixel with points in it
             spix_labels = []
             for spix in unique_spix:
-                if spix in labels_array[:, 1]:
+                # Only attempt to index labels_array if it has rows
+                if labels_array.shape[0] > 0 and spix in labels_array[:, 1]:
                     label_indices = np.where(labels_array[:, 1] == spix)[0]
-                    labels = labels_array[label_indices, 0]
-                    most_common = np.bincount(labels).argmax()
+                    labels_vals = labels_array[label_indices, 0].astype(int)
+                    if labels_vals.size == 0:
+                        continue
+                    most_common = np.bincount(labels_vals).argmax()
                     spix_features_row = spix_features[unique_spix == spix, 1:].flatten()
-                    spix_labels.append([spix, most_common] + list(spix_features_row))
-            
-            spix_labels = np.array(spix_labels)
+                    spix_labels.append([int(spix), int(most_common)] + list(spix_features_row))
+
+            # Convert spix_labels to array; ensure 2D even if empty
+            if len(spix_labels) == 0:
+                spix_labels = np.zeros((0, 2), dtype=int)
+            else:
+                spix_labels = np.array(spix_labels)
 
             # Prepare empty mask and propagate labels
             prop_mask = np.full((H, W), np.nan)
 
             for i, spix in enumerate(unique_spix):
                 r, c = np.where(connected == spix)
-                
+
                 # If already labeled, use label from spix_labels
-                if spix in spix_labels[:, 0]:
-                    label = spix_labels[spix_labels[:, 0] == spix, 1][0]
+                if spix_labels.size and spix in spix_labels[:, 0]:
+                    label = int(spix_labels[spix_labels[:, 0] == spix, 1][0])
                     prop_mask[r, c] = label
                 else:
                     # Find the nearest labeled superpixel by features
-                    labeled_spix_features = spix_labels[:, 2:]
-                    one_spix_features = spix_features[i, 1:]
-                    distances = np.linalg.norm(labeled_spix_features - one_spix_features, axis=1)
-                    nearest_spix_idx = np.argmin(distances)
-                    nearest_label = spix_labels[nearest_spix_idx, 1]
-                    prop_mask[r, c] = nearest_label
+                    if spix_labels.size == 0:
+                        # No labeled superpixels available; set to 0
+                        prop_mask[r, c] = 0
+                    else:
+                        labeled_spix_features = spix_labels[:, 2:].astype(float)
+                        one_spix_features = spix_features[i, 1:].astype(float)
+                        # If labeled_spix_features has zero columns (degenerate), fallback
+                        if labeled_spix_features.size == 0:
+                            prop_mask[r, c] = 0
+                        else:
+                            distances = np.linalg.norm(labeled_spix_features - one_spix_features, axis=1)
+                            nearest_spix_idx = np.argmin(distances)
+                            nearest_label = int(spix_labels[nearest_spix_idx, 1])
+                            prop_mask[r, c] = nearest_label
 
             return prop_mask
 
