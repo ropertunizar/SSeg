@@ -1,7 +1,7 @@
 # SSeg
 SSeg is a framework for efficient multi-class image segmentation that expands sparse point annotations into full masks using a hybrid SAM2–superpixel strategy with active point sampling
 
-![SSeg Example](assets/teaser.png)
+![SSeg Example](assets/teaser.pn)
 
 ## 1. Environment Setup
 
