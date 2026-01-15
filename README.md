@@ -3,7 +3,7 @@ SSeg is a framework for efficient multi-class image segmentation that expands sp
 
 ![SSeg Example](assets/teaser.png)
 
-<video src="https://github.com/cborjamoreno/SSeg/raw/main/assets/tool.mp4" width="100%" controls></video>
+![SSeg Tool](assets/tool.mp4)
 
 ## 1. Environment Setup
 
