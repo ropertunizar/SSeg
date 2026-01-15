@@ -39,7 +39,7 @@ Best for testing single images and visualizing results in real-time.
 
 ### Option B: Benchmark/Batch Mode
 Best for running experiments on full datasets and generating metrics.
-  ```
+
 - **Benchmark/Batch Mode:**
   ```bash
   python run.py
