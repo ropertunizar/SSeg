@@ -3,7 +3,9 @@ SSeg is a framework for efficient multi-class image segmentation that expands sp
 
 ![SSeg Example](assets/teaser.png)
 
-![SSeg_tool](assets/tool.mp4)
+<video src="assets/tool.mp4" width="100%" controls>
+  <p>Your browser does not support the video tag. Here is a <a href="assets/tool.mp4">link to the video</a> instead.</p>
+</video>
 
 ## 1. Environment Setup
 
