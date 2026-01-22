@@ -4,7 +4,7 @@ Replace placeholders like <PROJECT_NAME>, <PAPER_TITLE>, <YEAR>, <HOMEPAGE_URL>,
 Remove any sections you do not need.
 -->
 
-<h1 align="center">SSeg</h1>
+<h1 align="center">SSeg: Active Sparse Point-Label Augmentation for Sementic Segmentation</h1>
 <h3 align="center">CV4EO Workshop - WACV 2026</h3>
 
 <div align="center">
