@@ -2,6 +2,7 @@
 # filename: run_experiments.py
 
 import os
+import sys
 import subprocess
 import argparse
 import time
@@ -150,14 +151,43 @@ def run_experiment(experiment_name, strategy, output_dir, num_points=None, debug
     try:
         # Run with proper terminal emulation for tqdm
         log_path = exp_dir / "experiment.log"
-        
+
         # Method 1: Try using pty-based approach
         import pty
         import select
         import fcntl
         import termios
         import struct
-        
+
+        # If stdin isn't a real TTY (running under `conda run`, ssh -T, CI, nohup,
+        # piped output, etc.) the pty path's TIOCGWINSZ ioctl raises
+        # "[Errno 25] Inappropriate ioctl for device". Detect that up front and
+        # fall back to a plain subprocess that tees stdout to the log.
+        def run_plain():
+            with open(log_path, 'w') as log_file:
+                process = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    bufsize=1, universal_newlines=True
+                )
+                for line in process.stdout:
+                    print(line, end='', flush=True)
+                    log_file.write(line)
+                    log_file.flush()
+                return process.wait()
+
+        if not sys.stdin.isatty():
+            print("[run.py] stdin is not a TTY — using plain subprocess (no live tqdm bars).")
+            return_code = run_plain()
+            duration = time.time() - start_time
+            print(f"\nExperiment completed in {duration:.1f} seconds")
+            with open(exp_dir / "experiment_status.json", "w") as f:
+                json.dump({
+                    "success": return_code == 0,
+                    "return_code": return_code,
+                    "duration": duration
+                }, f, indent=2)
+            return return_code == 0, exp_dir
+
         def run_with_pty():
             # Get terminal size
             rows, cols = struct.unpack('hh', fcntl.ioctl(0, termios.TIOCGWINSZ, '1234'))

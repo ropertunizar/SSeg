@@ -37,28 +37,26 @@ SSeg is a framework for efficient multi-class image segmentation that expands sp
 
 ![SSeg Example](assets/teaser.png)
 
-## 🛠️ Requirements
+## 🛠️ Installation
 
-### Environment Setup
+PyTorch must match your CUDA driver, so installation is a two-step process
+(torch first, everything else second). See **[INSTALL.md](INSTALL.md)** for
+the manual walkthrough and troubleshooting.
+
+**Quick start (recommended):**
 
 ```bash
-conda create -n spuw python=3.10
+bash setup.sh                            # creates conda env "spuw", auto-detects CUDA
 conda activate spuw
-pip install -r requirements.txt
+bash checkpoints/download_ckpts.sh       # ~900 MB SAM2 checkpoint
+python run.py                            # smoke-tests the demo experiment
 ```
 
-### Download Model Checkpoints
+`setup.sh` flags: `--env-name <name>` (default `spuw`), `--cuda <ver>` to
+override detection, or `--cpu` for a CPU-only install.
 
-```bash
-cd checkpoints/
-./download_ckpts.sh
-```
-
-### CUDA & Driver Recommendations
-
-- This machine uses CUDA 11.5.
-- For best performance, use the same CUDA.
-- If CUDA is not available, the code will automatically run on CPU.
+**Requirements:** Linux, NVIDIA driver ≥ 525 with CUDA ≥ 11.8 (CPU works
+too — just slower), Python 3.10, conda, ~5 GB free disk.
 
 ## 🚀 Usage
 

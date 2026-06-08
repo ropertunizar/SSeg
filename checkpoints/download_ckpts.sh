@@ -60,7 +60,8 @@ download_gdrive() {
 
     if command -v gdown &> /dev/null; then
         echo "Using gdown to download Google Drive file..."
-        gdown --id "$file_id" -O "$dest"
+        # gdown >= 5.0 dropped --id; pass the id positionally.
+        gdown "$file_id" -O "$dest"
         return $?
     fi
 

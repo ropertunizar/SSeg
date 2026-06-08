@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from contextlib import contextmanager
 import torchvision.transforms as T
-from PyQt6.QtGui import QColor
 import torch.nn.functional as F
 import torchmetrics
 from PIL import Image

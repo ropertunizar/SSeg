@@ -2,3 +2,4 @@ checkpoints/
 labeled_images/
 labeled_masks/
 __pycache__/
+experiments/
