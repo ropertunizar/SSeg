@@ -120,7 +120,13 @@ class SuperpixelLabelExpander:
                 # Precompute a fixed subset of pixel indices once for all iterations for reproducibility
                 use_n = min(self.N, self.num_pixels_used)
                 dev = self.XY_features.device
-                if self._gen is not None and use_n < self.N:
+                # A torch.Generator created on a different device than the
+                # tensor it's sampling raises "Expected a 'cuda' device type
+                # for generator but found 'cpu'". Only use the dedicated
+                # generator when its device matches; otherwise fall back to
+                # the device-default RNG.
+                gen_ok = self._gen is not None and self._gen.device.type == dev.type
+                if gen_ok and use_n < self.N:
                     self.sample_indexes = torch.randperm(self.N, generator=self._gen, device=dev)[:use_n]
                 elif use_n < self.N:
                     self.sample_indexes = torch.randperm(self.N, device=dev)[:use_n]
@@ -362,7 +368,11 @@ class SuperpixelLabelExpander:
             current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Go up one level from plas/
             ckp_path = os.path.join(current_dir, "checkpoints", "standardization_C=100_step70000.pth")
             
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            # Respect the device the wrapper was constructed with — otherwise
+            # `--device cpu` on a CUDA-equipped host puts the CNN features on
+            # cuda while CustomLoss buffers stay on cpu, producing
+            # "Expected all tensors to be on the same device" later.
+            device = torch.device(self.device if torch.cuda.is_available() or self.device == 'cpu' else 'cpu')
             obj = torch.load(ckp_path, map_location=device)
             pretrained_dict = obj['net']
             pretrained_dict = {key[4:]: val for key, val in pretrained_dict.items() if key[4:] in model_dict}

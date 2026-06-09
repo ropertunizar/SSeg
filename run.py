@@ -152,17 +152,12 @@ def run_experiment(experiment_name, strategy, output_dir, num_points=None, debug
         # Run with proper terminal emulation for tqdm
         log_path = exp_dir / "experiment.log"
 
-        # Method 1: Try using pty-based approach
-        import pty
-        import select
-        import fcntl
-        import termios
-        import struct
-
-        # If stdin isn't a real TTY (running under `conda run`, ssh -T, CI, nohup,
-        # piped output, etc.) the pty path's TIOCGWINSZ ioctl raises
-        # "[Errno 25] Inappropriate ioctl for device". Detect that up front and
-        # fall back to a plain subprocess that tees stdout to the log.
+        # The pty/fcntl/termios modules are Unix-only — importing them at
+        # module level breaks Windows. Defer the import to the TTY branch.
+        # We also use a plain-subprocess fallback when stdin isn't a real
+        # TTY (conda run, ssh -T, CI, nohup, piped output, Windows) because
+        # the pty path's TIOCGWINSZ ioctl raises "[Errno 25] Inappropriate
+        # ioctl for device" in that case.
         def run_plain():
             with open(log_path, 'w') as log_file:
                 process = subprocess.Popen(
@@ -189,6 +184,13 @@ def run_experiment(experiment_name, strategy, output_dir, num_points=None, debug
             return return_code == 0, exp_dir
 
         def run_with_pty():
+            # Unix-only modules — imported here so the function body never runs
+            # on Windows (we'd have gone through run_plain() above).
+            import pty
+            import select
+            import fcntl
+            import termios
+            import struct
             # Get terminal size
             rows, cols = struct.unpack('hh', fcntl.ioctl(0, termios.TIOCGWINSZ, '1234'))
             
