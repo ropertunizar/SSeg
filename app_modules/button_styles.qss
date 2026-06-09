@@ -102,3 +102,29 @@ QPushButton.toggle-masks-button:disabled {
     background-color: #BDBDBD;
     opacity: 0.5;
 }
+
+/* BBox button - idle (teal, distinct from negative-red and positive-green) */
+QPushButton.bbox-button-idle {
+    background-color: #009688;
+    color: white;
+    border: 1px solid black;
+}
+QPushButton.bbox-button-idle:hover {
+    background-color: #00796B;
+}
+QPushButton.bbox-button-idle:disabled {
+    background-color: #BDBDBD;
+}
+
+/* BBox button - armed (bright cyan; user is about to drop the first corner) */
+QPushButton.bbox-button-active {
+    background-color: #00BFA5;
+    color: black;
+    border: 1px solid black;
+}
+QPushButton.bbox-button-active:hover {
+    background-color: #00897B;
+}
+QPushButton.bbox-button-active:disabled {
+    background-color: #BDBDBD;
+}

@@ -11,9 +11,9 @@ import warnings
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog, QVBoxLayout,
     QHBoxLayout, QMessageBox, QDialog, QProgressBar, QLineEdit, QListWidget,
-    QListWidgetItem, QColorDialog, QGridLayout
+    QListWidgetItem, QColorDialog, QGridLayout, QSizePolicy
 )
-from PyQt6.QtGui import QPixmap, QImage, QColor
+from PyQt6.QtGui import QPixmap, QImage, QColor, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 
 from segmenter_sam2 import Segmenter
@@ -113,14 +113,17 @@ class PointSuggestionThread(QThread):
 class MaskExpansionThread(QThread):
     result_ready = pyqtSignal(object)
 
-    def __init__(self, segmenter, points, labels):
+    def __init__(self, segmenter, points, labels, box=None):
         super().__init__()
         self.segmenter = segmenter
         self.points = points
         self.labels = labels
+        self.box = box
 
     def run(self):
-        mask = self.segmenter.propagate_points(self.points, self.labels, update_expanded_mask=True)
+        mask = self.segmenter.propagate_points(
+            self.points, self.labels, update_expanded_mask=True, box=self.box,
+        )
         self.result_ready.emit(mask)
 
 
@@ -129,12 +132,24 @@ class ImageViewer(QWidget):
         super().__init__()
 
         self.setWindowTitle("Image Viewer")
-        self.setGeometry(100, 100, 1200, 800)
+        # Pick an initial size that's a sensible fraction of the screen, so
+        # very tall/wide images get more room out of the box. Window stays
+        # resizable; the image label expands with it.
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            init_w = max(900, min(int(avail.width() * 0.8), 1800))
+            init_h = max(700, min(int(avail.height() * 0.9), 1400))
+        else:
+            init_w, init_h = 1400, 900
+        self.resize(init_w, init_h)
+        self.setMinimumSize(900, 700)
 
-        # Image display
+        # Image display — expanding so the canvas grows with the window.
         self.image_label = ClickableLabel(self)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setFixedSize(1000, 700)
+        self.image_label.setMinimumSize(640, 480)
+        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.image_label.clicked.connect(self.on_image_clicked)
         self.image_label.right_clicked.connect(self.on_image_right_clicked)
         self.image_label.interactions_enabled = False
@@ -179,6 +194,15 @@ class ImageViewer(QWidget):
         self.switch_button.setProperty("class", "switch-button-negative")
         self.switch_button.enterEvent = lambda e: self.on_cursor_over_button()
 
+        # BBox prompt button. Toggles a 2-click bbox-drawing mode (1st click =
+        # first corner, 2nd click = opposite corner; live preview between).
+        self.bbox_button = QPushButton("BBox", self)
+        self.bbox_button.clicked.connect(self.toggle_bbox_mode)
+        self.bbox_button.setFixedSize(80, 40)
+        self.bbox_button.setEnabled(False)
+        self.bbox_button.setProperty("class", "bbox-button-idle")
+        self.bbox_button.enterEvent = lambda e: self.on_cursor_over_button()
+
         self.finish_button = QPushButton("✓", self)
         self.finish_button.clicked.connect(self.on_finish_button_clicked)
         self.finish_button.setFixedSize(40, 40)
@@ -199,20 +223,29 @@ class ImageViewer(QWidget):
         bottom_button_layout.addStretch()
         bottom_button_layout.addWidget(self.start_button)
         bottom_button_layout.addWidget(self.switch_button)
+        bottom_button_layout.addWidget(self.bbox_button)
         bottom_button_layout.addWidget(self.finish_button)
         bottom_button_layout.addWidget(self.toggle_masks_button)
         bottom_button_layout.addStretch()
 
-        # Create a container widget for the image and navigation buttons
+        # Create a container widget for the image and navigation buttons.
+        # No fixed size — the grid stretches with the parent so the image
+        # column gets all the extra space when the window is resized.
         image_container = QWidget()
-        image_container.setFixedSize(1080, 700)  # Increased width to accommodate buttons
+        image_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         image_container_layout = QGridLayout(image_container)
         image_container_layout.setContentsMargins(0, 0, 0, 0)
         image_container_layout.setSpacing(0)
-        
+        # Only the middle column (with the image) gets stretch — the side
+        # nav-button columns stay compact.
+        image_container_layout.setColumnStretch(0, 0)
+        image_container_layout.setColumnStretch(1, 1)
+        image_container_layout.setColumnStretch(2, 0)
+        image_container_layout.setRowStretch(0, 1)
+
         # Add image label to the center
         image_container_layout.addWidget(self.image_label, 0, 1)  # Changed to column 1
-        
+
         # Add navigation buttons to corners
         image_container_layout.addWidget(self.prev_button, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         image_container_layout.addWidget(self.next_button, 0, 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -226,7 +259,10 @@ class ImageViewer(QWidget):
         top_layout.addStretch()
         
         main_layout.addLayout(top_layout)
-        main_layout.addWidget(image_container, alignment=Qt.AlignmentFlag.AlignCenter)
+        # stretch=1 so the image canvas takes all the vertical slack the
+        # top/bottom button rows don't need. No AlignCenter — that would
+        # collapse the widget to its sizeHint and leave huge empty space.
+        main_layout.addWidget(image_container, 1)
         main_layout.addLayout(bottom_button_layout)
         
         self.setLayout(main_layout)
@@ -251,8 +287,19 @@ class ImageViewer(QWidget):
         self.current_point_type = "positive"  # or "negative"
         self.is_selecting_points = False
 
+        # BBox prompt state. bbox_mode goes True when the user clicks the BBox
+        # button; the next image-click sets `bbox_first_corner`, and the click
+        # after that produces `current_bbox` (XYXY in image coords) and
+        # auto-exits bbox_mode. `input_history` is a unified placement log so
+        # Ctrl+Z can undo points and bboxes in actual placement order.
+        self.bbox_mode = False
+        self.bbox_first_corner = None
+        self.current_bbox = None
+        self.input_history = []  # entries: ("pos_point",), ("neg_point",), ("bbox", new_xyxy, prev_xyxy)
+
         # Initially hide the point selection buttons
         self.switch_button.hide()
+        self.bbox_button.hide()
         self.finish_button.hide()
         self.toggle_masks_button.hide()
 
@@ -281,7 +328,7 @@ class ImageViewer(QWidget):
             self.image_list = [
                 os.path.join(folder, f)
                 for f in os.listdir(folder)
-                if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".gif"))
+                if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"))
             ]
             self.image_list.sort()
             self.current_index = 0
@@ -303,6 +350,7 @@ class ImageViewer(QWidget):
             # Reset UI to initial state
             self.image_label.interactions_enabled = False
             self.switch_button.hide()
+            self.bbox_button.hide()
             self.finish_button.hide()
             self.toggle_masks_button.hide()
             self.toggle_masks_button.setEnabled(False)
@@ -311,8 +359,9 @@ class ImageViewer(QWidget):
             if self.image_list:
                 # Load and display the first image of the new folder
                 current_image_path = self.image_list[self.current_index]
-                image = cv2.imread(current_image_path)
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                image = self._load_and_normalize_image(current_image_path)
+                if image is None:
+                    return
                 self.current_image = image
                 self.show_image()
                 
@@ -328,6 +377,8 @@ class ImageViewer(QWidget):
         self.image_label.interactions_enabled = True
         self.switch_button.show()
         self.switch_button.setEnabled(False)  # Initially disabled
+        self.bbox_button.show()
+        self.bbox_button.setEnabled(True)  # bbox is usable from the first click
         self.finish_button.show()
         self.finish_button.setEnabled(False)  # Will be enabled after first positive point
         self.start_button.setEnabled(False)  # Disable Start button until Next Image is pressed
@@ -377,8 +428,9 @@ class ImageViewer(QWidget):
         sam2_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
         current_image_path = self.image_list[self.current_index]
 
-        image = cv2.imread(current_image_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = self._load_and_normalize_image(current_image_path)
+        if image is None:
+            return
         self.current_image = image
 
         if self.segmenter is None:
@@ -486,6 +538,67 @@ class ImageViewer(QWidget):
             self.suggested_point = None
         self.show_image(overlay_point=self.suggested_point)
 
+    # Max long-side (in pixels) we feed to SAM2. The auto mask generator
+    # upsamples low-res mask logits to the image's full resolution; on a
+    # 2048×12000 TIFF that allocation runs to ~140 GiB and OOMs even a 24 GB
+    # GPU. 2048 keeps the upsample tractable and matches the upper bound
+    # used in most SAM2 inference recipes.
+    SAM2_MAX_SIDE = 2048
+
+    def _load_and_normalize_image(self, path):
+        """Read an image from disk in RGB uint8, downscaling to fit inside
+        SAM2_MAX_SIDE on its longest side. Returns None on read failure.
+
+        Handles:
+          - >8-bit TIFFs (uint16 / float) — normalized to uint8.
+          - single-channel TIFFs — broadcast to 3 channels.
+          - multi-page TIFFs — only the first page is used (cv2 default).
+        """
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            print(f"[load] cv2.imread returned None for: {path}")
+            return None
+
+        # Normalize bit depth to uint8 if needed
+        if img.dtype != np.uint8:
+            mn, mx = float(img.min()), float(img.max())
+            if mx > mn:
+                img = ((img - mn) / (mx - mn) * 255.0).astype(np.uint8)
+            else:
+                img = np.zeros_like(img, dtype=np.uint8)
+
+        # Channel handling: gray -> RGB; BGR -> RGB; BGRA -> RGB
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif img.ndim == 3 and img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+        elif img.ndim == 3 and img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        else:
+            print(f"[load] Unexpected image shape {img.shape} for {path}")
+            return None
+
+        # Downscale if longest side exceeds the cap
+        h, w = img.shape[:2]
+        long_side = max(h, w)
+        if long_side > self.SAM2_MAX_SIDE:
+            scale = self.SAM2_MAX_SIDE / long_side
+            new_w, new_h = int(round(w * scale)), int(round(h * scale))
+            print(f"[load] Downscaling {os.path.basename(path)} {w}x{h} -> {new_w}x{new_h}")
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        return img
+
+    def _record_positive_point(self, point):
+        """Append a positive point and remember it in the undo history."""
+        self.positive_points.append(point)
+        self.input_history.append(("pos_point",))
+
+    def _record_negative_point(self, point):
+        """Append a negative point and remember it in the undo history."""
+        self.negative_points.append(point)
+        self.input_history.append(("neg_point",))
+
     def on_image_clicked(self, pos):
         if self.current_image is None or self.displayed_pixmap is None:
             return
@@ -494,7 +607,39 @@ class ImageViewer(QWidget):
         current_point = self.get_image_coordinates(pos)
         if current_point is None:
             return
-        
+
+        # BBox-drawing takes precedence over normal point placement when
+        # active. Click 1 = first corner, click 2 = opposite corner.
+        if self.bbox_mode and self.current_mode != "selection":
+            if self.bbox_first_corner is None:
+                self.bbox_first_corner = current_point
+                print(f"BBox first corner: {current_point}")
+                self.update_preview_with_points()
+            else:
+                x1 = min(self.bbox_first_corner[0], current_point[0])
+                y1 = min(self.bbox_first_corner[1], current_point[1])
+                x2 = max(self.bbox_first_corner[0], current_point[0])
+                y2 = max(self.bbox_first_corner[1], current_point[1])
+                # Reject degenerate boxes (single point / line) — treat as miss
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    print("BBox too small, ignoring; pick a wider opposite corner")
+                    return
+                prev = self.current_bbox
+                self.current_bbox = (x1, y1, x2, y2)
+                self.input_history.append(("bbox", self.current_bbox, prev))
+                self.bbox_first_corner = None
+                # Auto-exit bbox mode and restore button styling
+                self.bbox_mode = False
+                self.bbox_button.setText("BBox")
+                self.bbox_button.setProperty("class", "bbox-button-idle")
+                self.bbox_button.style().unpolish(self.bbox_button)
+                self.bbox_button.style().polish(self.bbox_button)
+                self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+                self.finish_button.setEnabled(True)
+                print(f"BBox set: {self.current_bbox}")
+                self.update_preview_with_points()
+            return
+
         # Check which mode we're in
         if hasattr(self, 'current_mode'):
             # Don't do anything on clicks in visualization mode
@@ -512,52 +657,39 @@ class ImageViewer(QWidget):
                 # Check if we're clicking over an existing mask for potential merging
                 mask_index = self.get_mask_at_position(current_point)
                 
-                # Add the point first
-                if self.current_point_type == "positive":
-                    self.positive_points.append(current_point)
-                    print(f"Positive point added at: {current_point}")
-                    self.finish_button.setEnabled(True)
-                    self.switch_button.setEnabled(True)
-                    # Track actual user click for adaptive strategy
-                    self.last_actual_click = current_point
-                else:
-                    self.negative_points.append(current_point)
-                    print(f"Negative point added at: {current_point}")
-                    # Track actual user click for adaptive strategy
-                    self.last_actual_click = current_point
-                
-                # Check if this click overlaps with existing masks (for positive points only)
+                # Check overlap first (for positive points only) — if the click
+                # lands on an existing mask, the overlap dialog takes over and
+                # we shouldn't pre-record the point.
                 overlap_info = None
                 if self.current_point_type == "positive":
-                    # Check if the clicked point overlaps with any existing mask
                     overlap_info = self.check_point_overlap(current_point)
-                
-                # Check if we need to handle overlap
+
                 if overlap_info:
-                    # Remove the point we just added since we'll handle it through overlap dialog
-                    if self.current_point_type == "positive":
-                        self.positive_points.pop()
-                    else:
-                        self.negative_points.pop()
                     self.handle_point_overlap(current_point, overlap_info)
                 else:
-                    # Normal point placement behavior
+                    if self.current_point_type == "positive":
+                        self._record_positive_point(current_point)
+                        print(f"Positive point added at: {current_point}")
+                        self.finish_button.setEnabled(True)
+                        self.switch_button.setEnabled(True)
+                    else:
+                        self._record_negative_point(current_point)
+                        print(f"Negative point added at: {current_point}")
+                    # Track actual user click for adaptive strategy
+                    self.last_actual_click = current_point
                     self.update_preview_with_points()
         else:
             # Fallback if mode is not set
             if self.current_point_type == "positive":
-                self.positive_points.append(current_point)
+                self._record_positive_point(current_point)
                 print(f"Positive point added at: {current_point}")
                 self.finish_button.setEnabled(True)
                 self.switch_button.setEnabled(True)
-                # Track actual user click for adaptive strategy
-                self.last_actual_click = current_point
             else:
-                self.negative_points.append(current_point)
+                self._record_negative_point(current_point)
                 print(f"Negative point added at: {current_point}")
-                # Track actual user click for adaptive strategy
-                self.last_actual_click = current_point
-            
+            # Track actual user click for adaptive strategy
+            self.last_actual_click = current_point
             # Update preview with the new point
             self.update_preview_with_points()
 
@@ -581,7 +713,7 @@ class ImageViewer(QWidget):
                 self.show_mask_context_menu(pos, mask_index)
 
     def update_preview_with_points(self):
-        """Update display with current points and preview mask"""
+        """Update display with current points, bbox and preview mask"""
         # Start with original image and add cached overlay if masks are visible
         overlay_image = self.current_image.copy()
         if self.masks_visible and self.combined_mask_overlay is not None:
@@ -593,16 +725,30 @@ class ImageViewer(QWidget):
         for point in self.negative_points:
             cv2.circle(overlay_image, point, 4, (255, 0, 0), -1)  # Red for negative
 
-        # Show dynamic expansion with current points
-        if self.positive_points or self.negative_points:
-            points = np.array(self.positive_points + self.negative_points)
-            labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points))
-            preview_mask = self.segmenter.propagate_points(points, labels, update_expanded_mask=False)
-            
+        # Draw the committed bbox, if any (cyan).
+        if self.current_bbox is not None:
+            x1, y1, x2, y2 = self.current_bbox
+            cv2.rectangle(overlay_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+        # Show dynamic expansion if we have any prompts at all (points or box)
+        if self.positive_points or self.negative_points or self.current_bbox is not None:
+            points = np.array(self.positive_points + self.negative_points) if (self.positive_points or self.negative_points) else None
+            labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points)) if (self.positive_points or self.negative_points) else None
+            preview_mask = self.segmenter.propagate_points(
+                points, labels, update_expanded_mask=False, box=self.current_bbox,
+            )
+
             if preview_mask is not None:
                 colored_preview = np.zeros_like(overlay_image)
                 colored_preview[preview_mask > 0] = (128, 128, 128)  # Gray for preview
                 overlay_image = cv2.addWeighted(overlay_image, 1.0, colored_preview, 0.4, 0)
+
+        # If we're between the two bbox clicks, show the first corner as a
+        # crosshair to remind the user where the drag started.
+        if self.bbox_mode and self.bbox_first_corner is not None:
+            cx, cy = self.bbox_first_corner
+            cv2.line(overlay_image, (cx - 8, cy), (cx + 8, cy), (0, 255, 255), 2)
+            cv2.line(overlay_image, (cx, cy - 8), (cx, cy + 8), (0, 255, 255), 2)
 
         # Show suggested point cross when updating preview with points
         if hasattr(self, 'suggested_point') and self.suggested_point:
@@ -1131,42 +1277,12 @@ class ImageViewer(QWidget):
         # Get image coordinates from screen coordinates
         image_pos = self.get_image_coordinates(pos)
         
-        # Special handling for cursor outside the image area
+        # Special handling for cursor outside the image area: freeze at the
+        # current prompt set (points + bbox). Delegate to the unified
+        # preview path so points + bbox stay in sync everywhere.
         if image_pos is None:
-            # If we have points, show expansion with just the existing points
-            if self.positive_points or self.negative_points:
-                # Start with original image and add cached overlay if masks are visible
-                overlay_image = self.current_image.copy()
-                if self.masks_visible and self.combined_mask_overlay is not None:
-                    overlay_image = cv2.addWeighted(overlay_image, 1.0, self.combined_mask_overlay, 0.8, 0)
-                
-                # Create points array with only existing points
-                points = np.array(self.positive_points + self.negative_points)
-                labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points))
-                
-                # Generate preview mask using only existing points
-                preview_mask = self.segmenter.propagate_points(points, labels, update_expanded_mask=False)
-                
-                # Add the preview mask
-                if preview_mask is not None:
-                    colored_preview = np.zeros_like(overlay_image)
-                    colored_preview[preview_mask > 0] = (128, 128, 128)  # Gray for preview
-                    overlay_image = cv2.addWeighted(overlay_image, 1.0, colored_preview, 0.4, 0)
-                
-                # Draw all current points
-                for point in self.positive_points:
-                    cv2.circle(overlay_image, point, 4, (0, 255, 0), -1)
-                for point in self.negative_points:
-                    cv2.circle(overlay_image, point, 4, (255, 0, 0), -1)
-                
-                # Add suggested point if it exists
-                if hasattr(self, 'suggested_point') and self.suggested_point and self.current_mode == "creation":
-                    row, col = self.suggested_point
-                    cv2.line(overlay_image, (col, row - 6), (col, row + 6), (255, 255, 0), 2)
-                    cv2.line(overlay_image, (col - 6, row), (col + 6, row), (255, 255, 0), 2)
-                    
-                # Update the display
-                self.update_display(overlay_image)
+            if self.positive_points or self.negative_points or self.current_bbox is not None:
+                self.update_preview_with_points()
             return
         
         # If we reach here, the cursor is inside the image
@@ -1193,68 +1309,30 @@ class ImageViewer(QWidget):
                     self.update_display_with_current_state()
 
     def on_cursor_over_button(self):
-        """Called when cursor enters any button"""
-        # First check if we're in labeling mode and if all required objects exist
+        """Called when cursor enters any button.
+
+        Freezes the preview at "what the current prompts would produce" —
+        i.e. points + bbox together — so leaving the canvas to click Finish
+        doesn't visually wipe the bbox or revert the SAM2 preview to
+        points-only.
+        """
         if not self.is_selecting_points or self.current_image is None or self.segmenter is None:
             return
-            
-        # If in visualization mode (masks hidden), don't show any masks
+
+        # In visualization mode (masks hidden), keep behavior simple: base
+        # image plus the suggested-point cross.
         if self.current_mode == "visualization" or not self.masks_visible:
-            # Just show the base image without any masks
             overlay_image = self.current_image.copy()
-            
-            # Show suggested point when hovering over buttons
             if hasattr(self, 'suggested_point') and self.suggested_point and self.current_mode == "creation":
                 row, col = self.suggested_point
                 cv2.line(overlay_image, (col, row - 6), (col, row + 6), (255, 255, 0), 2)
                 cv2.line(overlay_image, (col - 6, row), (col + 6, row), (255, 255, 0), 2)
-            
             self.update_display(overlay_image)
             return
-        
-        # For regular mode with visible masks - continue with existing behavior
-        if self.positive_points or self.negative_points:
-            points = np.array(self.positive_points + self.negative_points)
-            labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points))
-            preview_mask = self.segmenter.propagate_points(points, labels, update_expanded_mask=False)
-            
-            # Start with original image and add cached overlay if it exists
-            overlay_image = self.current_image.copy()
-            if self.combined_mask_overlay is not None:
-                overlay_image = cv2.addWeighted(overlay_image, 1.0, self.combined_mask_overlay, 0.8, 0)
 
-            # Add the preview mask if it exists
-            if preview_mask is not None:
-                colored_preview = np.zeros_like(overlay_image)
-                colored_preview[preview_mask > 0] = (128, 128, 128)  # Gray instead of green
-                overlay_image = cv2.addWeighted(overlay_image, 1.0, colored_preview, 0.4, 0)
-            
-            # Draw all current points
-            for point in self.positive_points:
-                cv2.circle(overlay_image, point, 4, (0, 255, 0), -1)  # Green for positive
-            for point in self.negative_points:
-                cv2.circle(overlay_image, point, 4, (255, 0, 0), -1)  # Red for negative
-            
-            # Show suggested point when hovering over buttons
-            if hasattr(self, 'suggested_point') and self.suggested_point:
-                row, col = self.suggested_point
-                cv2.line(overlay_image, (col, row - 6), (col, row + 6), (255, 255, 0), 2)
-                cv2.line(overlay_image, (col - 6, row), (col + 6, row), (255, 255, 0), 2)
-            
-            self.update_display(overlay_image)
-        else:
-            # If no points are placed, just show the base image with any existing overlay
-            overlay_image = self.current_image.copy()
-            if self.combined_mask_overlay is not None and self.masks_visible:
-                overlay_image = cv2.addWeighted(overlay_image, 1.0, self.combined_mask_overlay, 0.8, 0)
-            
-            # Show suggested point when hovering over buttons
-            if hasattr(self, 'suggested_point') and self.suggested_point:
-                row, col = self.suggested_point
-                cv2.line(overlay_image, (col, row - 6), (col, row + 6), (255, 255, 0), 2)
-                cv2.line(overlay_image, (col - 6, row), (col + 6, row), (255, 255, 0), 2)
-            
-            self.update_display(overlay_image)
+        # Delegate to the unified preview path — it already draws committed
+        # points + committed bbox + a SAM2 preview that conditions on both.
+        self.update_preview_with_points()
 
     def dynamic_expand(self, pos):
         """Handle dynamic expansion with cursor position"""
@@ -1266,10 +1344,24 @@ class ImageViewer(QWidget):
         cursor_point = self.get_image_coordinates(pos)
         if cursor_point is None:
             return
-            
+
+        # BBox armed but no first corner yet: don't run the dynamic
+        # point-expansion at all (it's distracting and irrelevant — the next
+        # click sets a corner, not a point). Just keep the static overlay
+        # with already-committed prompts visible.
+        if self.bbox_mode and self.bbox_first_corner is None:
+            self.update_preview_with_points()
+            return
+
+        # Mid-bbox-draw: render a live rectangle from the first corner to the
+        # cursor, plus a SAM2 preview using points + that temporary box.
+        if self.bbox_mode and self.bbox_first_corner is not None:
+            self._render_bbox_draw_preview(cursor_point)
+            return
+
         # First check if we're over an existing mask
         mask_index = self.get_mask_at_position(cursor_point)
-        
+
         # Update cursor and mask selection state
         if mask_index is not None and self.masks_visible:
             # If we just entered a mask, switch to pointing hand cursor
@@ -1283,7 +1375,7 @@ class ImageViewer(QWidget):
                 self.is_over_mask = False
                 self.current_mask_index = None
                 self.setCursor(Qt.CursorShape.ArrowCursor)
-        
+
         # Start with original image and add cached overlay if it exists
         overlay_image = self.current_image.copy()
         if self.combined_mask_overlay is not None:
@@ -1295,11 +1387,18 @@ class ImageViewer(QWidget):
         for point in self.negative_points:
             cv2.circle(overlay_image, point, 4, (255, 0, 0), -1)  # Red for negative
 
+        # Draw the committed bbox if any
+        if self.current_bbox is not None:
+            x1, y1, x2, y2 = self.current_bbox
+            cv2.rectangle(overlay_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
         # Create points array with all current points plus cursor
         points = np.array(self.positive_points + self.negative_points + [cursor_point])
         cursor_label = 0 if self.current_point_type == "negative" else 1
         labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points) + [cursor_label])
-        preview_mask = self.segmenter.propagate_points(points, labels, update_expanded_mask=False)
+        preview_mask = self.segmenter.propagate_points(
+            points, labels, update_expanded_mask=False, box=self.current_bbox,
+        )
 
         # Add the preview mask if it exists
         if preview_mask is not None:
@@ -1316,6 +1415,48 @@ class ImageViewer(QWidget):
             row, col = self.suggested_point
             cv2.line(overlay_image, (col, row - 6), (col, row + 6), (255, 255, 0), 2)
             cv2.line(overlay_image, (col - 6, row), (col + 6, row), (255, 255, 0), 2)
+
+        self.update_display(overlay_image)
+
+    def _render_bbox_draw_preview(self, cursor_point):
+        """Render the live rectangle while the user is between the 1st and
+        2nd bbox click. Includes a SAM2 preview using the committed points
+        plus the in-progress box, so the user can judge the box before they
+        commit the 2nd click.
+        """
+        overlay_image = self.current_image.copy()
+        if self.combined_mask_overlay is not None:
+            overlay_image = cv2.addWeighted(overlay_image, 1.0, self.combined_mask_overlay, 0.8, 0)
+
+        # Existing points (committed)
+        for point in self.positive_points:
+            cv2.circle(overlay_image, point, 4, (0, 255, 0), -1)
+        for point in self.negative_points:
+            cv2.circle(overlay_image, point, 4, (255, 0, 0), -1)
+
+        # In-progress rectangle from first_corner to cursor
+        x1 = min(self.bbox_first_corner[0], cursor_point[0])
+        y1 = min(self.bbox_first_corner[1], cursor_point[1])
+        x2 = max(self.bbox_first_corner[0], cursor_point[0])
+        y2 = max(self.bbox_first_corner[1], cursor_point[1])
+        cv2.rectangle(overlay_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+        # Preview SAM2 with the temp box (skip if degenerate to avoid noise)
+        if x2 - x1 >= 2 and y2 - y1 >= 2:
+            points = np.array(self.positive_points + self.negative_points) if (self.positive_points or self.negative_points) else None
+            labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points)) if (self.positive_points or self.negative_points) else None
+            preview_mask = self.segmenter.propagate_points(
+                points, labels, update_expanded_mask=False, box=(x1, y1, x2, y2),
+            )
+            if preview_mask is not None:
+                colored_preview = np.zeros_like(overlay_image)
+                colored_preview[preview_mask > 0] = (128, 128, 128)
+                overlay_image = cv2.addWeighted(overlay_image, 1.0, colored_preview, 0.4, 0)
+
+        # Crosshair at the first corner (so the anchor stays visible)
+        cx, cy = self.bbox_first_corner
+        cv2.line(overlay_image, (cx - 8, cy), (cx + 8, cy), (0, 255, 255), 2)
+        cv2.line(overlay_image, (cx, cy - 8), (cx, cy + 8), (0, 255, 255), 2)
 
         self.update_display(overlay_image)
 
@@ -1403,8 +1544,9 @@ class ImageViewer(QWidget):
         # Start with the original image
         if self.current_image is None:
             current_image_path = self.image_list[self.current_index]
-            image = cv2.imread(current_image_path)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = self._load_and_normalize_image(current_image_path)
+            if image is None:
+                return
             self.current_image = image
 
         # Create a fresh overlay with the original image
@@ -1469,11 +1611,12 @@ class ImageViewer(QWidget):
         
         # Hide the point selection buttons and enable Start button
         self.switch_button.hide()
+        self.bbox_button.hide()
         self.finish_button.hide()
         self.toggle_masks_button.hide()
         self.toggle_masks_button.setEnabled(False)
         self.start_button.setEnabled(True)
-        
+
         # Move to next image
         self.current_index += 1
         
@@ -1482,8 +1625,9 @@ class ImageViewer(QWidget):
             self.point_strategy = None
             # Load and display the new image
             current_image_path = self.image_list[self.current_index]
-            image = cv2.imread(current_image_path)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = self._load_and_normalize_image(current_image_path)
+            if image is None:
+                return
             self.current_image = image
             self.show_image()
         else:
@@ -1603,6 +1747,20 @@ class ImageViewer(QWidget):
         self.next_button.setEnabled(False)
         self.prev_button.setEnabled(False)
 
+    def resizeEvent(self, event):
+        """Redraw the current overlay at the new label size so the image
+        scales smoothly while the user drags the window. Pixmap scaling
+        already respects aspect ratio in update_display/show_image."""
+        super().resizeEvent(event)
+        # Only redraw if we actually have an image loaded; resize fires once
+        # during construction before anything is set up.
+        if getattr(self, "current_image", None) is not None:
+            try:
+                self.update_display_with_current_state()
+            except Exception:
+                # Don't crash the GUI if a redraw happens mid-state-transition
+                pass
+
     def closeEvent(self, event):
         if self.image_list and 0 <= self.current_index < len(self.image_list) and self.expanded_masks:
             # Only show save dialog if there are masks to save
@@ -1630,58 +1788,98 @@ class ImageViewer(QWidget):
         """Switch between positive and negative point selection"""
         if self.current_point_type == "positive":
             self.current_point_type = "negative"
-            self.switch_button.setText("Positive") 
+            self.switch_button.setText("Positive")
             self.switch_button.setProperty("class", "switch-button-positive")
         else:
             self.current_point_type = "positive"
             self.switch_button.setText("Negative")
             self.switch_button.setProperty("class", "switch-button-negative")
-        
+
         # Force style refresh
         self.switch_button.style().unpolish(self.switch_button)
         self.switch_button.style().polish(self.switch_button)
 
+    def toggle_bbox_mode(self):
+        """Enter / leave bbox-drawing mode.
+
+        Active state: next image-click sets the first corner; the click after
+        that sets the opposite corner, stores the bbox, and auto-exits the
+        mode. Mouse-move between the two clicks renders a live rectangle.
+        """
+        self.bbox_mode = not self.bbox_mode
+        if not self.bbox_mode:
+            # Cancel any in-progress placement
+            self.bbox_first_corner = None
+        # Visual cue: append a filled-square glyph when active
+        self.bbox_button.setText("BBox ◼" if self.bbox_mode else "BBox")
+        self.bbox_button.setProperty(
+            "class",
+            "bbox-button-active" if self.bbox_mode else "bbox-button-idle",
+        )
+        self.bbox_button.style().unpolish(self.bbox_button)
+        self.bbox_button.style().polish(self.bbox_button)
+        # Cursor: cross-hair while armed, arrow otherwise.
+        if self.bbox_mode:
+            self.image_label.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+        # Refresh preview so the cursor visual updates immediately
+        if self.is_selecting_points:
+            self.update_preview_with_points()
+
     def on_finish_button_clicked(self):
         """Handle finish button click - expand mask and update UI"""
-        if not self.is_expanding and self.positive_points:
+        if not self.is_expanding and (self.positive_points or self.current_bbox is not None):
             # Stop any ongoing expansion
             if hasattr(self, 'expansion_thread') and self.expansion_thread and self.expansion_thread.isRunning():
                 self.expansion_thread.terminate()
                 self.expansion_thread.wait()
-            
-            # Combine positive and negative points
-            points = np.array(self.positive_points + self.negative_points)
-            # Create appropriate labels (1 for positive points, 0 for negative points)
-            labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points))
-            
-            # Store positive points for reference
+
+            # Combine positive and negative points (may be empty when only a
+            # bbox is used).
+            if self.positive_points or self.negative_points:
+                points = np.array(self.positive_points + self.negative_points)
+                labels = np.array([1] * len(self.positive_points) + [0] * len(self.negative_points))
+            else:
+                points, labels = None, None
+
+            # Store positive points for reference (overlap/strategy logic uses them).
             stored_positive_points = self.positive_points.copy()
-            
+            box_for_run = self.current_bbox
+
             # Create expansion thread with correct points and labels format
             self.expansion_thread = MaskExpansionThread(
                 self.segmenter,
                 points,
-                labels
+                labels,
+                box=box_for_run,
             )
-            
+
             # Connect to result_ready signal instead of finished signal
             self.expansion_thread.result_ready.connect(
                 lambda mask: self.on_mask_expansion_complete(mask, stored_positive_points)
             )
-            
+
             # Start expansion
             self.is_expanding = True
             self.expansion_thread.start()
-            
+
             # Update UI
             self.finish_button.setEnabled(False)
-            
-            # REMOVED: Don't add examples here as they're added in on_mask_expansion_complete
-            # This was causing duplicate examples in the database
-            
-            # Clear points for next mask
+
+            # Clear prompts and history for next mask. Reset bbox state too so
+            # the next cycle starts clean.
             self.positive_points = []
             self.negative_points = []
+            self.current_bbox = None
+            self.bbox_first_corner = None
+            self.bbox_mode = False
+            self.bbox_button.setText("BBox")
+            self.bbox_button.setProperty("class", "bbox-button-idle")
+            self.bbox_button.style().unpolish(self.bbox_button)
+            self.bbox_button.style().polish(self.bbox_button)
+            self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+            self.input_history = []
             # Note: Don't reset last_actual_click here - it's needed for the next thread
 
     def prev_image(self):
@@ -1710,17 +1908,19 @@ class ImageViewer(QWidget):
         
         # Hide the point selection buttons and enable Start button
         self.switch_button.hide()
+        self.bbox_button.hide()
         self.finish_button.hide()
         self.toggle_masks_button.hide()
         self.start_button.setEnabled(True)
-        
+
         # Move to previous image
         self.current_index -= 1
-        
+
         # Load and display the new image
         current_image_path = self.image_list[self.current_index]
-        image = cv2.imread(current_image_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = self._load_and_normalize_image(current_image_path)
+        if image is None:
+            return
         self.current_image = image
         self.show_image()
 
@@ -1733,30 +1933,35 @@ class ImageViewer(QWidget):
         # Check for Ctrl+Z
         if event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             if self.current_mode == "creation" and self.is_selecting_points:
-                # Remove the last placed point
-                if self.negative_points and self.current_point_type == "negative":
-                    removed_point = self.negative_points.pop()
-                    print(f"Removed negative point at: {removed_point}")
-                elif self.positive_points and self.current_point_type == "positive":
-                    removed_point = self.positive_points.pop()
-                    print(f"Removed positive point at: {removed_point}")
-                    # If no positive points left, disable finish button
-                    if not self.positive_points:
-                        self.finish_button.setEnabled(False)
-                else:
-                    # Try the opposite type as well (more intuitive)
-                    if self.negative_points:
-                        removed_point = self.negative_points.pop()
-                        print(f"Removed negative point at: {removed_point}")
-                    elif self.positive_points:
-                        removed_point = self.positive_points.pop()
-                        print(f"Removed positive point at: {removed_point}")
-                        # If no positive points left, disable finish button
-                        if not self.positive_points:
+                # If we're mid-bbox-draw (first corner placed but not the
+                # second), cancel that draw first — it has no history entry
+                # yet so this only resets local state.
+                if self.bbox_mode and self.bbox_first_corner is not None:
+                    print("Cancelled in-progress bbox")
+                    self.bbox_first_corner = None
+                    self.update_preview_with_points()
+                elif self.input_history:
+                    entry = self.input_history.pop()
+                    kind = entry[0]
+                    if kind == "pos_point" and self.positive_points:
+                        removed = self.positive_points.pop()
+                        print(f"Removed positive point at: {removed}")
+                        if not self.positive_points and self.current_bbox is None:
                             self.finish_button.setEnabled(False)
-                
-                # Update the display
-                self.update_preview_with_points()
+                    elif kind == "neg_point" and self.negative_points:
+                        removed = self.negative_points.pop()
+                        print(f"Removed negative point at: {removed}")
+                    elif kind == "bbox":
+                        _, _, prev_bbox = entry
+                        print(f"Removed bbox {self.current_bbox}; restored {prev_bbox}")
+                        self.current_bbox = prev_bbox
+                        if (
+                            not self.positive_points
+                            and self.current_bbox is None
+                        ):
+                            self.finish_button.setEnabled(False)
+                    # Update the display
+                    self.update_preview_with_points()
         
         # Call the parent class handler
         super().keyPressEvent(event)

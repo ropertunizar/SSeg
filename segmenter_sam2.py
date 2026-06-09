@@ -242,40 +242,54 @@ class Segmenter:
 
         return best_index
 
-    def propagate_points(self, points, labels, update_expanded_mask=True):
+    def propagate_points(self, points, labels, update_expanded_mask=True, box=None):
         """
-        Propagate points into a mask using SAM2
+        Propagate points (and optionally a bounding box) into a mask using SAM2.
 
         Args:
-            points: Point prompt coordinates
+            points: Point prompt coordinates, or None / empty when only a box is given.
             labels: Point prompt labels. 1 if positive, 0 if negative.
-            update_expanded_mask (bool): Whether to update the expanded_areas_mask. 
-                                       Should be True only for actual point predictions, 
+            update_expanded_mask (bool): Whether to update the expanded_areas_mask.
+                                       Should be True only for actual point predictions,
                                        False for dynamic expansion visualization.
+            box: Optional length-4 array-like in XYXY pixel coords. Forwarded to
+                SAM2 as a `box=` prompt. When supplied alongside points, SAM2
+                conditions on both jointly.
 
         Returns:
-            np.array: Mask propagated from points.
+            np.array: Mask propagated from the prompts.
         """
-        # Convert points and labels to the correct format
-        # The predictor expects NumPy arrays, not PyTorch tensors
-        if isinstance(points, torch.Tensor):
-            points = points.cpu().numpy()
-        elif isinstance(points, list):
-            points = np.array(points)
+        # Normalize points/labels into numpy. With a box-only prompt callers
+        # may pass empty/None — translate that to None for the predictor.
+        def _to_np(x):
+            if x is None:
+                return None
+            if isinstance(x, torch.Tensor):
+                return x.cpu().numpy()
+            if isinstance(x, list):
+                return np.array(x) if len(x) else None
+            return x
 
-        if isinstance(labels, torch.Tensor):
-            labels = labels.cpu().numpy()
-        elif isinstance(labels, list):
-            labels = np.array(labels)
+        points = _to_np(points)
+        labels = _to_np(labels)
+        if points is not None and len(points) == 0:
+            points, labels = None, None
+
+        box_np = None
+        if box is not None:
+            box_np = np.array(box, dtype=np.float32).reshape(-1)
+            if box_np.size != 4:
+                raise ValueError(f"box must be length-4 XYXY, got shape {box_np.shape}")
 
         masks, scores, logits = self.predictor.predict(
             point_coords=points,
             point_labels=labels,
+            box=box_np,
             multimask_output=True,
         )
 
         predicted_mask = masks[self._weighted_mask_selection(masks, scores)]
-        
+
         return predicted_mask.astype(bool)
     
     def cleanup(self):
