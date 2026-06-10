@@ -65,17 +65,38 @@ You can run the framework in two modes:
 ### Option A: Interactive GUI
 Best for testing single images and visualizing results in real-time.
 
-- **Interactive GUI:**
-  ```bash
-  python app.py
+```bash
+python app.py
+```
+
+Pick a folder of images with **Select Folder**, then press **Start** to load the
+segmenter and begin annotating. The tool suggests the next point to label (yellow
+cross) and shows a live preview of the mask as you hover.
+
+**Controls:**
+
+- **Left click** — place a prompt. Toggle the **Negative / Positive** button to
+  switch between positive points (include) and negative points (exclude).
+- **BBox** — click the button to arm box-prompt mode, then click two opposite
+  corners to draw a bounding box prompt; a live preview is shown between the two
+  clicks. Points and boxes can be combined for the same mask.
+- **✓ (Finish)** — expand the current prompts into a mask and assign it a label.
+- **👁️ (Toggle masks)** — show / hide the committed masks.
+- **Right click** on an existing mask — delete it or change its label.
+- **Ctrl + mouse wheel** — zoom the display in (wheel forward) / out (wheel
+  backward) for finer annotation. Zoom starts at 100% (fit-to-window); when the
+  zoomed image no longer fits, horizontal and vertical scrollbars appear so you
+  can pan. Zooming only affects the display — point and box coordinates stay at
+  full image resolution.
+- **Ctrl + Z** — undo the last point or box (in placement order).
+- **< / >** — move to the previous / next image (prompts to save first).
 
 ### Option B: Benchmark/Batch Mode
 Best for running experiments on full datasets and generating metrics.
-  ```
-- **Benchmark/Batch Mode:**
-  ```bash
-  python run.py
-  ```
+
+```bash
+python run.py
+```
   (Requires ground truth images for point-label assignment)
 
 ### Configuring Batch Experiments

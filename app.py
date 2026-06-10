@@ -11,7 +11,8 @@ import warnings
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog, QVBoxLayout,
     QHBoxLayout, QMessageBox, QDialog, QProgressBar, QLineEdit, QListWidget,
-    QListWidgetItem, QColorDialog, QGridLayout, QSizePolicy
+    QListWidgetItem, QColorDialog, QGridLayout, QSizePolicy, QScrollArea,
+    QFrame
 )
 from PyQt6.QtGui import QPixmap, QImage, QColor, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
@@ -73,9 +74,22 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if (self.interactions_enabled):   
+        if (self.interactions_enabled):
             self.mouse_moved.emit(event.pos())
         super().mouseMoveEvent(event)
+
+# Scroll area that hosts the image label and provides zoom-on-Ctrl+wheel.
+# A plain wheel scrolls the view (when the zoomed image overflows); Ctrl+wheel
+# is forwarded to the viewer so it can zoom centered on the cursor.
+class ZoomScrollArea(QScrollArea):
+    ctrl_wheel = pyqtSignal(object)  # forwards the QWheelEvent
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.ctrl_wheel.emit(event)
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
 # Thread to suggest the next point using the adaptive interactive selection strategy
 class PointSuggestionThread(QThread):
@@ -145,14 +159,29 @@ class ImageViewer(QWidget):
         self.resize(init_w, init_h)
         self.setMinimumSize(900, 700)
 
-        # Image display — expanding so the canvas grows with the window.
+        # Image display. The label is sized exactly to the (possibly zoomed)
+        # pixmap and lives inside a scroll area, so when the user zooms past
+        # 100% and the image overflows the viewport, scrollbars appear.
         self.image_label = ClickableLabel(self)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(640, 480)
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.image_label.clicked.connect(self.on_image_clicked)
         self.image_label.right_clicked.connect(self.on_image_right_clicked)
         self.image_label.interactions_enabled = False
+
+        # Scroll area hosting the image. Zoom == 1.0 means "fit to window"
+        # (the historical default); Ctrl+wheel forward zooms in from there.
+        self.zoom_factor = 1.0
+        self.min_zoom = 1.0
+        self.max_zoom = 8.0
+        self.scroll_area = ZoomScrollArea(self)
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.scroll_area.ctrl_wheel.connect(self.on_ctrl_wheel_zoom)
 
         # Buttons
         stylesheet = load_stylesheet("app_modules/button_styles.qss")
@@ -243,8 +272,8 @@ class ImageViewer(QWidget):
         image_container_layout.setColumnStretch(2, 0)
         image_container_layout.setRowStretch(0, 1)
 
-        # Add image label to the center
-        image_container_layout.addWidget(self.image_label, 0, 1)  # Changed to column 1
+        # Add the scroll area (which hosts the image label) to the center
+        image_container_layout.addWidget(self.scroll_area, 0, 1)  # Changed to column 1
 
         # Add navigation buttons to corners
         image_container_layout.addWidget(self.prev_button, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1499,19 +1528,86 @@ class ImageViewer(QWidget):
 
         self.update_display(overlay_image)
 
-    def update_display(self, overlay_image):
-        """Helper method to update the display with a new image"""
+    def _base_fit_scale(self, width, height):
+        """Scale that fits a (width x height) image inside the scroll-area
+        viewport while preserving aspect ratio. This is the zoom == 1.0
+        ("100%", fit-to-window) reference; actual display scale multiplies
+        this by self.zoom_factor."""
+        vp = self.scroll_area.viewport().size()
+        vw, vh = vp.width(), vp.height()
+        if vw <= 0 or vh <= 0 or width <= 0 or height <= 0:
+            return 1.0
+        return min(vw / width, vh / height)
+
+    def _render_pixmap_to_label(self, overlay_image):
+        """Render a full-resolution RGB overlay into the image label at the
+        current zoom level. The label is sized exactly to the scaled pixmap so
+        that (a) get_image_coordinates keeps a zero centering offset and (b) the
+        scroll area shows scrollbars when the zoomed image overflows."""
         height, width, channel = overlay_image.shape
         bytes_per_line = 3 * width
         qimage = QImage(overlay_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
+
+        scale = self._base_fit_scale(width, height) * self.zoom_factor
+        disp_w = max(1, int(round(width * scale)))
+        disp_h = max(1, int(round(height * scale)))
         scaled_pixmap = pixmap.scaled(
-            self.image_label.size(),
+            disp_w,
+            disp_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
         self.displayed_pixmap = scaled_pixmap
         self.image_label.setPixmap(scaled_pixmap)
+        # Size the label to the pixmap so the scroll area knows the content
+        # extent (and centers it when smaller than the viewport).
+        self.image_label.setFixedSize(scaled_pixmap.size())
+
+    def update_display(self, overlay_image):
+        """Helper method to update the display with a new image"""
+        self._render_pixmap_to_label(overlay_image)
+
+    def on_ctrl_wheel_zoom(self, event):
+        """Zoom in/out on Ctrl+wheel, centered on the cursor.
+
+        Wheel forward zooms in; wheel backward zooms out, clamped so it never
+        goes below 100% (fit-to-window). Coordinates of points/bboxes are
+        unaffected — only the on-screen display scale changes."""
+        if self.current_image is None or self.displayed_pixmap is None:
+            return
+
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        old_zoom = self.zoom_factor
+        step = 1.25 if delta > 0 else 1.0 / 1.25
+        new_zoom = max(self.min_zoom, min(old_zoom * step, self.max_zoom))
+        if abs(new_zoom - old_zoom) < 1e-6:
+            return
+
+        # Image fraction currently under the cursor (in label/content coords),
+        # clamped in case the cursor sits in the centered margin at zoom 1.0.
+        gpos = event.globalPosition().toPoint()
+        cursor_lbl = self.image_label.mapFromGlobal(gpos)
+        old_w = max(1, self.image_label.width())
+        old_h = max(1, self.image_label.height())
+        fx = min(1.0, max(0.0, cursor_lbl.x() / old_w))
+        fy = min(1.0, max(0.0, cursor_lbl.y() / old_h))
+
+        # Where the cursor sits inside the viewport (target it stays fixed at).
+        cursor_vp = self.scroll_area.viewport().mapFromGlobal(gpos)
+
+        # Apply the new zoom and re-render (this resizes the label).
+        self.zoom_factor = new_zoom
+        self.update_display_with_current_state()
+
+        # Re-anchor: keep the same image fraction under the cursor.
+        new_x = fx * self.image_label.width()
+        new_y = fy * self.image_label.height()
+        self.scroll_area.horizontalScrollBar().setValue(int(round(new_x - cursor_vp.x())))
+        self.scroll_area.verticalScrollBar().setValue(int(round(new_y - cursor_vp.y())))
 
     def get_image_coordinates(self, pos):
         """Helper function to convert screen coordinates to image coordinates"""
@@ -1540,6 +1636,9 @@ class ImageViewer(QWidget):
         if not self.image_list or self.current_index >= len(self.image_list):
             print("No image available to display.")
             return
+
+        # Fresh image display always returns to 100% (fit-to-window).
+        self.zoom_factor = 1.0
 
         # Start with the original image
         if self.current_image is None:
@@ -1571,18 +1670,8 @@ class ImageViewer(QWidget):
             cv2.line(image, (col, row - line_length), (col, row + line_length), line_color, line_thickness)
             cv2.line(image, (col - line_length, row), (col + line_length, row), line_color, line_thickness)
 
-        # Update the display
-        height, width, channel = image.shape
-        bytes_per_line = 3 * width
-        qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimage)
-        scaled_pixmap = pixmap.scaled(
-            self.image_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.displayed_pixmap = scaled_pixmap
-        self.image_label.setPixmap(scaled_pixmap)
+        # Update the display (honors the current zoom level)
+        self._render_pixmap_to_label(image)
 
     def next_image(self):
         if not self.image_list or self.current_index >= len(self.image_list):
