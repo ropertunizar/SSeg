@@ -118,7 +118,6 @@ experiments = [
         # Advanced Parameters
         "lambda_balance": 0.5,          # (Dynamic only) Balance exploration/exploitation
         "heatmap_fraction": 0.5,        # (Dynamic only) % of points from uncertainty map
-        "maskSLIC": True,               # Enable superpixel refinement
         "visualizations": True          # Save debug images
     }
 ]
