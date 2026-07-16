@@ -155,11 +155,12 @@ These keys can be used inside the experiment dictionary in `run.py`:
  
 ## 📝 Citation
 ```bibtex
-@article{borja2025sparseuwseg,
-  title={SparseUWSeg: Active Sparse Point-Label Augmentation for Underwater Semantic Segmentation},
-  author={Borja, C{\'e}sar and Plou, Carlos and Martinez-Cant{\'\i}n, Rub{\'e}n and Murillo, Ana C},
-  journal={arXiv preprint arXiv:2510.10163},
-  year={2025}
+@inproceedings{borja2026sseg,
+  title={SSeg: Active Sparse Point-Label Augmentation for Semantic Segmentation},
+  author={Borja, Cesar and Plou, Carlos and Martinez-Cantin, Ruben and Murillo, Ana C},
+  booktitle={Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision},
+  pages={1424--1434},
+  year={2026}
 }
 ```
 
