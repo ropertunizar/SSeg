@@ -151,7 +151,7 @@ These keys can be used inside the experiment dictionary in `run.py`:
 
 
 ## 📜 License
- Discuss with your supervisor the license that you want to set and include the licenses of any previous repo in which your code was inspired.
+ This work is under AGPL-3.0 license.
  
 ## 📝 Citation
 ```bibtex
