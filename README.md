@@ -137,13 +137,11 @@ These keys can be used inside the experiment dictionary in `run.py`:
 - `num_points`: Total point budget per image (default: 30).
 - `color_dict`: Path to JSON file mapping colors to class IDs (essential for RGB GTs).
 - `default-background-class-id`: Integer ID to use for the background class (default: 0).
-- `maskSLIC`: Set to `True` to enable MaskSLIC superpixel refinement.
 - `visualizations`: Set to `True` to save overlay images for debugging.
 
 **Optional (Strategy Specific)**
 - `lambda_balance`: (Dynamic only) Float [0-1]. Higher values favor exploitation (coverage).
 - `heatmap_fraction`: (Dynamic only) Float [0-1]. Ratio of points sampled from uncertainty heatmap.
-- `strategy_kwargs`: A dictionary of extra parameters specific to the chosen strategy (e.g., `{"propagation_overlap_policy": "last"}`).
 
 **Debugging**
 - `debug_expanded_masks`: Set to `True` to save individual SAM2 expansion steps.
